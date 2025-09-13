@@ -2,36 +2,41 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# punteggi ufficiali della F1 per GP normali (1..10)
-F1_POINTS_GP = {1: 25, 2: 18, 3: 15, 4: 12, 5: 10, 6: 8, 7: 6, 8: 4, 9: 2, 10: 1}
-# punteggi per sprint (1..8)
-F1_POINTS_SPRINT = {1: 8, 2: 7, 3: 6, 4: 5, 5: 4, 6: 3, 7: 2, 8: 1}
-
+# Funzione che calcola i punti di un pilota
 def calc_pilot_points(p):
 """
-Calcola i punti per un pilota.
-p: dizionario con info della gara
-Ritorna: punteggio totale e breakdown
+p: dict con i dati del pilota
 """
 pts = 0.0
 breakdown = []
 
-is_sprint = bool(p.get("is_sprint", False))
-finish_pos = p.get("finish_position")
+# --- Punteggio base dalla posizione in gara ---
+if p.get("position_gp") is not None:
+pos = p["position_gp"]
+if pos == 1:
+pts += 25
+elif pos == 2:
+pts += 18
+elif pos == 3:
+pts += 15
+elif pos == 4:
+pts += 12
+elif pos == 5:
+pts += 10
+elif pos == 6:
+pts += 8
+elif pos == 7:
+pts += 6
+elif pos == 8:
+pts += 4
+elif pos == 9:
+pts += 2
+elif pos == 10:
+pts += 1
+breakdown.append(("position_gp", pts))
 
-# 1) Punti ufficiali della gara
-if finish_pos and isinstance(finish_pos, int):
-if is_sprint:
-base = F1_POINTS_SPRINT.get(finish_pos, 0)
-else:
-base = F1_POINTS_GP.get(finish_pos, 0)
-pts += base
-breakdown.append(("race_points", base))
-else:
-breakdown.append(("race_points", 0))
-
-# 2) Bonus
-if p.get("pole", False) and not is_sprint:
+# --- Bonus ---
+if p.get("pole", False):
 pts += 2
 breakdown.append(("bonus_pole", 2))
 
@@ -41,38 +46,30 @@ breakdown.append(("bonus_fastest_lap", 1))
 
 if p.get("driver_of_the_day", False):
 pts += 1
-breakdown.append(("bonus_dotd", 1))
+breakdown.append(("bonus_driver_of_the_day", 1))
 
 if p.get("fastest_pitstop", False):
 pts += 2
 breakdown.append(("bonus_fastest_pitstop", 2))
 
-if p.get("started_last_two_rows", False):
-earned = 0
-if finish_pos and isinstance(finish_pos, int):
-if is_sprint:
-earned = F1_POINTS_SPRINT.get(finish_pos, 0)
-else:
-earned = F1_POINTS_GP.get(finish_pos, 0)
-if earned > 0:
+if p.get("from_back_and_points", False):
 pts += 2
-breakdown.append(("bonus_start_last_rows_to_points", 2))
+breakdown.append(("bonus_back_to_points", 2))
 
-pos_gained = p.get("positions_gained", 0) or 0
-if pos_gained > 0:
-add = 0.5 * pos_gained
-pts += add
-breakdown.append(("bonus_positions_gained", add))
+if p.get("positions_gained", 0) > 0:
+bonus = 0.5 * p["positions_gained"]
+pts += bonus
+breakdown.append(("bonus_positions_gained", bonus))
 
-if not is_sprint and finish_pos == 1:
+if p.get("win_gp", False):
 pts += 3
-breakdown.append(("bonus_victory", 3))
+breakdown.append(("bonus_win", 3))
 
-if not is_sprint and finish_pos in (2, 3):
+if p.get("podium_gp", False):
 pts += 2
 breakdown.append(("bonus_podium", 2))
 
-# 3) Malus
+# --- Malus ---
 if p.get("disqualified", False):
 pts -= 5
 breakdown.append(("malus_disqualified", -5))
@@ -89,63 +86,40 @@ elif 0 < penalty_seconds <= 5:
 pts -= 3
 breakdown.append(("malus_penalty_5_or_less", -3))
 
-# 👉 Malus "gomma bucata" rimosso come richiesto
-
-if p.get("finished", False) and isinstance(finish_pos, int):
-if p.get("is_last_finisher", False):
+if p.get("last_in_race", False) and not p.get("dnf", False):
 pts -= 2
-breakdown.append(("malus_last_finisher", -2))
+breakdown.append(("malus_last_in_race", -2))
 
-if not p.get("dnf", False):
-pos_lost = p.get("positions_lost", 0) or 0
-if pos_lost > 0:
-dec = 0.5 * pos_lost
-pts -= dec
-breakdown.append(("malus_positions_lost", -dec))
+if p.get("no_q1", False):
+pts -= 1
+breakdown.append(("malus_no_q1", -1))
 
-pts = round(pts, 2)
+if p.get("positions_lost", 0) > 0 and not p.get("dnf", False):
+malus = 0.5 * p["positions_lost"]
+pts -= malus
+breakdown.append(("malus_positions_lost", -malus))
+
 return pts, breakdown
 
-@app.route("/compute", methods=["POST"])
-def compute():
+
+# --- API ---
+@app.route("/calculate", methods=["POST"])
+def calculate():
 data = request.get_json()
-drivers = data.get("drivers", [])
-teams = data.get("teams", [])
+players = data.get("players", [])
 
-pilot_points = {}
-pilot_breakdowns = {}
-for d in drivers:
-pid = d.get("driver_id")
-pts, breakdown = calc_pilot_points(d)
-pilot_points[pid] = pts
-pilot_breakdowns[pid] = breakdown
+results = {}
+for player in players:
+total = 0
+details = []
+for pilot in player.get("pilots", []):
+pts, breakdown = calc_pilot_points(pilot)
+total += pts
+details.append({"pilot": pilot["name"], "points": pts, "breakdown": breakdown})
+results[player["name"]] = {"total": total, "details": details}
 
-team_results = []
-for t in teams:
-tid = t.get("team_id")
-players = t.get("players", [])
-for pl in players:
-pl_id = pl.get("player_id")
-schierati = pl.get("drivers_to_field", [])
-total = 0.0
-breakdowns = {}
-for dname in schierati:
-val = pilot_points.get(dname, 0.0)
-total += val
-breakdowns[dname] = {"points": val, "breakdown": pilot_breakdowns.get(dname, [])}
-team_results.append({
-"team_id": tid,
-"player_id": pl_id,
-"drivers_fielded": schierati,
-"total_points": round(total, 2),
-"drivers": breakdowns
-})
+return jsonify(results)
 
-return jsonify({
-"pilot_points": pilot_points,
-"pilot_breakdowns": pilot_breakdowns,
-"team_results": team_results
-}), 200
 
 if __name__ == "__main__":
-app.run(host="0.0.0.0", port=10000)
+app.run(host="0.0.0.0", port=5000)
